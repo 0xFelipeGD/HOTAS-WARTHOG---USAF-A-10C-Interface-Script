@@ -4,7 +4,7 @@
   "device_name": "Thustmaster Joystick - HOTAS Warthog",
   "vid": "044F",
   "pid": "0402",
-  "scan_timestamp": "2026-04-02T09:48:30",
+  "scan_timestamp": "2026-04-02T10:28:34",
   "axes": [
     {
       "code": 0,

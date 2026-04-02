@@ -350,6 +350,15 @@ def write_mapping(mapping: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="HOTAS Warthog device scanner")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    help="Suppress terminal output (only write JSON files)")
+    args = ap.parse_args()
+
+    if args.quiet:
+        sys.stdout = open(os.devnull, "w")
+
     print("\n" + "=" * 60)
     print("  HOTAS WARTHOG — Linux Device Scanner")
     print("  Thrustmaster A-10C Joystick Interface")

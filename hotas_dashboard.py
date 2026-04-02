@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
-# =============================================================================
-# hotas_dashboard.py
-#
-# Step 2 — Real-time visual dashboard for the Thrustmaster HOTAS Warthog.
-#
-# Usage:
-#   python3 hotas_dashboard.py
-#
-# Architecture:
-#   • evdev  → input reading on daemon threads (one per USB device)
-#   • pygame → 60 Hz render loop on the main thread
-#   • SharedState → thread-safe snapshot between the two layers
-#
-# The dashboard works with or without the JSON files from scan_joystick.py.
-# If the files exist they provide calibrated axis ranges; otherwise the script
-# auto-detects the device using VID/PID and uses the default ranges from
-# warthog_mappings.py.
-#
-# Permissions:
-#   sudo usermod -aG input $USER   (then log out and back in)
-# =============================================================================
+"""
+hotas_dashboard.py  v2 — Upgraded real-time dashboard
+Thrustmaster HOTAS Warthog (USAF A-10C replica) — Linux
+
+Tabs (press TAB or click):
+  LIVE  — Axes with 2-D stick plot, D-pad hat indicators, button LEDs
+  MAP   — Full button reference table with live press highlighting
+
+Keys:
+  TAB / M   switch tabs          F   toggle fullscreen
+  ESC       quit
+"""
 
 import sys
 import os
@@ -27,38 +18,21 @@ import json
 import time
 import threading
 
-# ---------------------------------------------------------------------------
-# Dependency checks — clear messages before cryptic ImportErrors
-# ---------------------------------------------------------------------------
+# ── dependency checks ─────────────────────────────────────────────────────────
 try:
     import evdev
     from evdev import ecodes
 except ImportError:
-    print("\n[ERROR] The 'evdev' library is not installed.")
-    print("  Install: pip install evdev\n")
+    print("\n[ERROR] evdev not installed.  Run: pip install evdev\n")
     sys.exit(1)
 
 try:
     import pygame
+    import pygame.gfxdraw
 except ImportError:
-    print("\n[ERROR] The 'pygame' library is not installed.")
-    print("  Install: pip install pygame\n")
+    print("\n[ERROR] pygame not installed.  Run: pip install pygame\n")
     sys.exit(1)
 
-# Local modules
-from config.constants import (
-    WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE,
-    TARGET_FPS, RECONNECT_INTERVAL,
-    COLOR_BG, COLOR_PANEL_BG, COLOR_TEXT, COLOR_TEXT_DIM,
-    COLOR_TEXT_HEADER, COLOR_GREEN, COLOR_GREEN_DIM, COLOR_RED,
-    COLOR_AMBER, COLOR_BLUE, COLOR_BLUE_TROT, COLOR_DARK_GRAY,
-    COLOR_BORDER, COLOR_CENTER_LINE,
-    AXIS_BAR_WIDTH, AXIS_BAR_HEIGHT, AXIS_LABEL_W,
-    BUTTON_LED_RADIUS, BUTTON_LABEL_OFFSET, BUTTON_COL_W, BUTTON_ROW_H,
-    HAT_BOX_SIZE, HAT_ARROW_LEN,
-    SECTION_PAD, SECTION_GAP,
-    VENDOR_THRUSTMASTER, PID_WARTHOG_STICK, PID_WARTHOG_THROTTLE,
-)
 from warthog_mappings import (
     STICK_BUTTON_MAP, STICK_AXIS_MAP, STICK_HAT_MAP,
     STICK_BUTTON_GROUPS,
@@ -66,761 +40,900 @@ from warthog_mappings import (
     THROTTLE_BUTTON_GROUPS,
     STICK_NAME_PATTERNS, THROTTLE_NAME_PATTERNS,
 )
+from config.constants import (
+    VENDOR_THRUSTMASTER, PID_WARTHOG_STICK, PID_WARTHOG_THROTTLE,
+    TARGET_FPS, RECONNECT_INTERVAL,
+)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-BASE_DIR   = os.path.dirname(__file__)
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-STICK_JSON    = os.path.join(OUTPUT_DIR, "warthog_stick_map.json")
-THROTTLE_JSON = os.path.join(OUTPUT_DIR, "warthog_throttle_map.json")
+# ── paths ─────────────────────────────────────────────────────────────────────
+_BASE         = os.path.dirname(os.path.abspath(__file__))
+STICK_JSON    = os.path.join(_BASE, "output", "warthog_stick_map.json")
+THROTTLE_JSON = os.path.join(_BASE, "output", "warthog_throttle_map.json")
+
+# ── window / layout ───────────────────────────────────────────────────────────
+W, H      = 1600, 950
+TAB_H     = 52          # top header+tab bar
+FOOT_H    = 30          # footer bar
+COL_W     = W // 2      # 800 — each device column
+PAD       = 8
+
+DEV_HDR_H = 36          # device name + status bar
+AXES_H    = 144         # axes panel height
+HATS_H    = 144         # hats panel height
+
+# derived
+CONTENT_TOP   = TAB_H + DEV_HDR_H + 2
+AXES_BOTTOM   = CONTENT_TOP + AXES_H + 2
+HATS_BOTTOM   = AXES_BOTTOM + HATS_H + 2
+BTNS_BOTTOM   = H - FOOT_H - 2
+BTNS_H        = BTNS_BOTTOM - HATS_BOTTOM
+
+TAB_LIVE, TAB_MAP = 0, 1
+
+# ── color palette — military cockpit ─────────────────────────────────────────
+C_BG       = ( 12,  16,  22)
+C_PANEL    = ( 21,  26,  35)
+C_BORDER   = ( 44,  51,  66)
+C_TEXT     = (198, 208, 224)
+C_DIM      = ( 90, 103, 122)
+C_AMBER    = (232, 172,  26)   # main accent
+C_AMBER_D  = ( 75,  55,   8)
+C_GREEN    = ( 48, 214,  98)   # active / pressed
+C_GREEN2   = ( 30, 140,  62)   # mid glow ring
+C_GREEN3   = ( 14,  62,  28)   # outer glow ring
+C_RED      = (210,  52,  52)
+C_BLUE     = ( 62, 142, 255)   # stick axis fill (light)
+C_BLUE_D   = ( 20,  48,  92)   # stick axis fill (dark)
+C_TEAL     = ( 48, 192, 158)   # throttle axis fill (light)
+C_TEAL_D   = ( 16,  70,  56)   # throttle axis fill (dark)
+C_DPAD_ON  = ( 48, 214,  98)
+C_DPAD_OFF = ( 33,  40,  53)
+C_BTN_OFF  = ( 36,  42,  56)
+C_WHITE    = (238, 244, 255)
+C_ROW_ODD  = ( 20,  25,  34)
+C_ROW_EVEN = ( 25,  30,  42)
+C_ROW_HIT  = ( 18,  58,  32)   # pressed row in MAP tab
 
 
-# =============================================================================
-# SharedState — thread-safe state container
-# =============================================================================
-
+# ═════════════════════════════════════════════════════════════════════════════
+# SharedState — thread-safe input state
+# ═════════════════════════════════════════════════════════════════════════════
 class SharedState:
-    """
-    Stores the latest values from both evdev input threads.
-    The render thread calls snapshot() to get a point-in-time copy without
-    holding the lock during the entire draw cycle.
-    """
-
     def __init__(self):
-        self._lock = threading.Lock()
-
-        # Axes: {evdev_code: float}  (normalised to -1.0..1.0 or 0.0..1.0)
-        self.stick_axes     = {}
-        self.throttle_axes  = {}
-
-        # Buttons: {evdev_code: bool}
-        self.stick_buttons    = {}
+        self._lock           = threading.Lock()
+        self.stick_axes      = {}
+        self.throttle_axes   = {}
+        self.stick_buttons   = {}
         self.throttle_buttons = {}
+        self.stick_hats      = {}
+        self.throttle_hats   = {}
+        self._hat_pend_s     = {}
+        self._hat_pend_t     = {}
+        self.stick_ok        = False
+        self.throttle_ok     = False
+        self._s_ev = self._t_ev = 0
+        self.s_eps = self.t_eps = 0
+        self._stat_t = time.monotonic()
 
-        # Hats: {"H1": (hat_x_raw, hat_y_raw)} where raw is -1, 0, or 1
-        self.stick_hats    = {}
-        self.throttle_hats = {}
-
-        # Pending hat axis updates (we receive X and Y separately)
-        self._hat_pending_stick    = {}
-        self._hat_pending_throttle = {}
-
-        # Connection flags
-        self.stick_connected    = False
-        self.throttle_connected = False
-
-        # Stats
-        self.stick_events_sec    = 0
-        self.throttle_events_sec = 0
-        self._stick_event_count    = 0
-        self._throttle_event_count = 0
-        self._last_stat_time = time.monotonic()
-
-    # ---- Axis ---------------------------------------------------------------
-
-    def update_axis(self, device_type: str, code: int, norm_value: float) -> None:
+    def update_axis(self, dev, code, val):
         with self._lock:
-            if device_type == "stick":
-                self.stick_axes[code] = norm_value
-            else:
-                self.throttle_axes[code] = norm_value
+            (self.stick_axes if dev == "stick" else self.throttle_axes)[code] = val
 
-    # ---- Button -------------------------------------------------------------
-
-    def update_button(self, device_type: str, code: int, pressed: bool) -> None:
+    def update_button(self, dev, code, pressed):
         with self._lock:
-            if device_type == "stick":
+            if dev == "stick":
                 self.stick_buttons[code] = pressed
-                self._stick_event_count += 1
+                self._s_ev += 1
             else:
                 self.throttle_buttons[code] = pressed
-                self._throttle_event_count += 1
+                self._t_ev += 1
 
-    # ---- Hat (received as two separate EV_ABS events) ----------------------
-
-    def update_hat_axis(self, device_type: str, code: int, raw: int,
-                        hat_map: dict) -> None:
-        """
-        Accumulate X / Y hat axis events then resolve to (x, y) tuple.
-        hat_map: the STICK_HAT_MAP or THROTTLE_HAT_MAP dict.
-        """
+    def update_hat_axis(self, dev, code, raw, hat_map):
         with self._lock:
-            pending = (self._hat_pending_stick
-                       if device_type == "stick"
-                       else self._hat_pending_throttle)
-            hats    = (self.stick_hats
-                       if device_type == "stick"
-                       else self.throttle_hats)
-
-            for hat_key, hat_def in hat_map.items():
-                if code == hat_def["code_x"]:
-                    pending.setdefault(hat_key, [None, None])
-                    pending[hat_key][0] = raw
-                elif code == hat_def["code_y"]:
-                    pending.setdefault(hat_key, [None, None])
-                    pending[hat_key][1] = raw
-
-                # Publish once both axes received
-                if hat_key in pending:
-                    x, y = pending[hat_key]
+            pend = self._hat_pend_s if dev == "stick" else self._hat_pend_t
+            hats = self.stick_hats  if dev == "stick" else self.throttle_hats
+            for key, hd in hat_map.items():
+                if code == hd["code_x"]:
+                    pend.setdefault(key, [None, None]); pend[key][0] = raw
+                elif code == hd["code_y"]:
+                    pend.setdefault(key, [None, None]); pend[key][1] = raw
+                if key in pend:
+                    x, y = pend[key]
                     if x is not None and y is not None:
-                        hats[hat_key] = (x, y)
-                        pending[hat_key] = [None, None]
+                        hats[key] = (x, y); pend[key] = [None, None]
 
-    # ---- Connection ---------------------------------------------------------
-
-    def set_connected(self, device_type: str, value: bool) -> None:
+    def set_ok(self, dev, val):
         with self._lock:
-            if device_type == "stick":
-                self.stick_connected = value
-            else:
-                self.throttle_connected = value
+            if dev == "stick": self.stick_ok = val
+            else:              self.throttle_ok = val
 
-    # ---- Stats tick (called once per second from main thread) ---------------
-
-    def tick_stats(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_stat_time
-        if elapsed >= 1.0:
+    def tick(self):
+        now = time.monotonic(); dt = now - self._stat_t
+        if dt >= 1.0:
             with self._lock:
-                self.stick_events_sec    = int(self._stick_event_count    / elapsed)
-                self.throttle_events_sec = int(self._throttle_event_count / elapsed)
-                self._stick_event_count    = 0
-                self._throttle_event_count = 0
-            self._last_stat_time = now
+                self.s_eps = int(self._s_ev / dt)
+                self.t_eps = int(self._t_ev / dt)
+                self._s_ev = self._t_ev = 0
+            self._stat_t = now
 
-    # ---- Snapshot (render thread uses this) ---------------------------------
-
-    def snapshot(self) -> dict:
-        """Return a shallow-copied, immutable snapshot — no lock held after return."""
+    def snapshot(self):
         with self._lock:
-            return {
-                "stick_axes":         dict(self.stick_axes),
-                "throttle_axes":      dict(self.throttle_axes),
-                "stick_buttons":      dict(self.stick_buttons),
-                "throttle_buttons":   dict(self.throttle_buttons),
-                "stick_hats":         dict(self.stick_hats),
-                "throttle_hats":      dict(self.throttle_hats),
-                "stick_connected":    self.stick_connected,
-                "throttle_connected": self.throttle_connected,
-                "stick_events_sec":   self.stick_events_sec,
-                "throttle_events_sec":self.throttle_events_sec,
-            }
+            return dict(
+                stick_axes=dict(self.stick_axes),
+                throttle_axes=dict(self.throttle_axes),
+                stick_buttons=dict(self.stick_buttons),
+                throttle_buttons=dict(self.throttle_buttons),
+                stick_hats=dict(self.stick_hats),
+                throttle_hats=dict(self.throttle_hats),
+                stick_ok=self.stick_ok,
+                throttle_ok=self.throttle_ok,
+                s_eps=self.s_eps,
+                t_eps=self.t_eps,
+            )
 
 
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 # Axis normalisation
-# =============================================================================
-
-def normalise_axis(raw: int, ax_min: int, ax_max: int, bipolar: bool) -> float:
-    """
-    Map a raw axis integer to a float.
-    bipolar=True  → -1.0 … +1.0
-    bipolar=False →  0.0 …  1.0
-    """
-    if ax_max == ax_min:
-        return 0.0
-    ratio = (raw - ax_min) / (ax_max - ax_min)   # 0.0 … 1.0
-    return (ratio * 2.0 - 1.0) if bipolar else ratio
+# ═════════════════════════════════════════════════════════════════════════════
+def normalise(raw, mn, mx, bipolar):
+    if mx == mn: return 0.0
+    r = (raw - mn) / (mx - mn)
+    return r * 2.0 - 1.0 if bipolar else r
 
 
-# =============================================================================
-# Mapping loader — JSON or fallback
-# =============================================================================
-
-def _load_json(path: str) -> dict | None:
+# ═════════════════════════════════════════════════════════════════════════════
+# Mapping / device helpers
+# ═════════════════════════════════════════════════════════════════════════════
+def _load_json(path):
     try:
-        with open(path) as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
+        with open(path) as f: return json.load(f)
+    except Exception: return None
 
+def build_axis_lookup(js, axis_map):
+    lu = {}
+    if js:
+        for ax in js.get("axes", []):
+            c = ax["code"]
+            lu[c] = {"min": ax["min"], "max": ax["max"],
+                     "bipolar": axis_map.get(c, {}).get("bipolar", True)}
+    for c, info in axis_map.items():
+        lu.setdefault(c, {"min": 0, "max": 65535, "bipolar": info["bipolar"]})
+    return lu
 
-def build_axis_lookup(mapping_json: dict | None,
-                      axis_map: dict) -> dict:
-    """
-    Returns {code: {min, max, bipolar}} for normalisation.
-    Prefers data from scan_joystick.py JSON (calibrated hardware ranges),
-    falls back to theoretical 0–65535 for unknown axes.
-    """
-    lookup = {}
-    if mapping_json:
-        for ax in mapping_json.get("axes", []):
-            code    = ax["code"]
-            bipolar = axis_map.get(code, {}).get("bipolar", True)
-            lookup[code] = {"min": ax["min"], "max": ax["max"], "bipolar": bipolar}
-    # Fill gaps from warthog_mappings (use 0–65535 as default range)
-    for code, info in axis_map.items():
-        if code not in lookup:
-            lookup[code] = {"min": 0, "max": 65535, "bipolar": info["bipolar"]}
-    return lookup
-
-
-# =============================================================================
-# Device detection
-# =============================================================================
-
-def _name_matches(name: str, patterns: list) -> bool:
+def _name_ok(name, pats):
     n = (name or "").lower()
-    return any(p.lower() in n for p in patterns)
+    return any(p.lower() in n for p in pats)
 
-
-def auto_detect_warthog() -> tuple:
-    """Returns (stick_path, throttle_path) — either may be None."""
-    stick_path    = None
-    throttle_path = None
+def auto_detect():
+    sp = tp = None
     for path in evdev.list_devices():
         try:
-            dev = evdev.InputDevice(path)
-            info = dev.info
-            if info.vendor == VENDOR_THRUSTMASTER:
-                if info.product == PID_WARTHOG_STICK:
-                    stick_path = path
-                elif info.product == PID_WARTHOG_THROTTLE:
-                    throttle_path = path
-            elif _name_matches(dev.name, STICK_NAME_PATTERNS):
-                stick_path = stick_path or path
-            elif _name_matches(dev.name, THROTTLE_NAME_PATTERNS):
-                throttle_path = throttle_path or path
-            dev.close()
-        except (PermissionError, OSError):
-            pass
-    return stick_path, throttle_path
+            d = evdev.InputDevice(path); i = d.info
+            if i.vendor == VENDOR_THRUSTMASTER:
+                if i.product == PID_WARTHOG_STICK:    sp = path
+                elif i.product == PID_WARTHOG_THROTTLE: tp = path
+            elif _name_ok(d.name, STICK_NAME_PATTERNS):    sp = sp or path
+            elif _name_ok(d.name, THROTTLE_NAME_PATTERNS): tp = tp or path
+            d.close()
+        except Exception: pass
+    return sp, tp
+
+def resolve_path(js, fallback):
+    if js:
+        c = js.get("device_path")
+        if c and os.path.exists(c): return c
+    return fallback
 
 
-def resolve_device_path(json_map: dict | None, fallback_path: str | None) -> str | None:
-    """Use the path from the JSON mapping if valid, else use fallback."""
-    if json_map:
-        candidate = json_map.get("device_path")
-        if candidate and os.path.exists(candidate):
-            return candidate
-    return fallback_path
-
-
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 # Input reader thread
-# =============================================================================
-
-def input_reader(device_path: str, device_type: str,
-                 axis_lookup: dict, hat_map: dict,
-                 shared: SharedState) -> None:
-    """
-    Daemon thread: opens the evdev device and runs an infinite read loop.
-    On disconnect (OSError) it waits RECONNECT_INTERVAL and retries.
-    """
+# ═════════════════════════════════════════════════════════════════════════════
+def input_reader(path, dev, axis_lu, hat_map, shared):
     while True:
         try:
-            dev = evdev.InputDevice(device_path)
-            shared.set_connected(device_type, True)
-            for event in dev.read_loop():
-                if event.type == ecodes.EV_ABS:
-                    code = event.code
-                    # Check if it is a hat axis
-                    is_hat = any(
-                        code in (hd["code_x"], hd["code_y"])
-                        for hd in hat_map.values()
-                    )
+            d = evdev.InputDevice(path); shared.set_ok(dev, True)
+            for ev in d.read_loop():
+                if ev.type == ecodes.EV_ABS:
+                    is_hat = any(ev.code in (hd["code_x"], hd["code_y"])
+                                 for hd in hat_map.values())
                     if is_hat:
-                        shared.update_hat_axis(device_type, code, event.value, hat_map)
+                        shared.update_hat_axis(dev, ev.code, ev.value, hat_map)
                     else:
-                        ax_info = axis_lookup.get(code)
-                        if ax_info:
-                            norm = normalise_axis(
-                                event.value,
-                                ax_info["min"],
-                                ax_info["max"],
-                                ax_info["bipolar"],
-                            )
-                            shared.update_axis(device_type, code, norm)
-                elif event.type == ecodes.EV_KEY:
-                    shared.update_button(device_type, event.code, bool(event.value))
+                        ax = axis_lu.get(ev.code)
+                        if ax:
+                            shared.update_axis(dev, ev.code,
+                                normalise(ev.value, ax["min"], ax["max"], ax["bipolar"]))
+                elif ev.type == ecodes.EV_KEY:
+                    shared.update_button(dev, ev.code, bool(ev.value))
         except PermissionError:
-            print(f"[{device_type.upper()}] Permission denied on {device_path}.")
-            print("  Fix: sudo usermod -aG input $USER  then log out and back in.")
-            shared.set_connected(device_type, False)
-            time.sleep(RECONNECT_INTERVAL)
+            print(f"[{dev.upper()}] Permission denied — sudo usermod -aG input $USER")
+            shared.set_ok(dev, False); time.sleep(RECONNECT_INTERVAL)
         except OSError:
-            shared.set_connected(device_type, False)
-            time.sleep(RECONNECT_INTERVAL)
+            shared.set_ok(dev, False); time.sleep(RECONNECT_INTERVAL)
 
 
-# =============================================================================
-# Rendering helpers
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
+# Drawing primitives
+# ═════════════════════════════════════════════════════════════════════════════
 
-def draw_panel(surf: pygame.Surface,
-               rect: pygame.Rect,
-               title: str,
-               font_h: pygame.font.Font) -> None:
-    """Draw a rounded-corner panel with a title bar."""
-    pygame.draw.rect(surf, COLOR_PANEL_BG, rect, border_radius=6)
-    pygame.draw.rect(surf, COLOR_BORDER,   rect, width=1, border_radius=6)
-    lbl = font_h.render(title, True, COLOR_TEXT_HEADER)
-    surf.blit(lbl, (rect.x + SECTION_PAD, rect.y + 4))
+def filled_rect(surf, color, rect, r=4):
+    pygame.draw.rect(surf, color, rect, border_radius=r)
+
+def outlined_rect(surf, fill, border, rect, r=4, bw=1):
+    pygame.draw.rect(surf, fill,   rect, border_radius=r)
+    pygame.draw.rect(surf, border, rect, width=bw, border_radius=r)
+
+def h_separator(surf, y, x0=0, x1=W):
+    pygame.draw.line(surf, C_BORDER, (x0, y), (x1, y), 1)
+
+def v_separator(surf, x, y0=TAB_H, y1=H-FOOT_H):
+    pygame.draw.line(surf, C_BORDER, (x, y0), (x, y1), 2)
 
 
-def draw_axis_bar(surf: pygame.Surface,
-                  font: pygame.font.Font,
-                  x: int, y: int,
-                  label: str,
-                  value: float,
-                  bipolar: bool,
-                  color: tuple) -> None:
+def draw_axis_bar(surf, fonts, x, y, avail_w, label, value, bipolar, lc, dc):
     """
-    Draw a horizontal progress bar representing one axis value.
-    bipolar=True: bar fills from centre outward; value range -1.0..1.0
-    bipolar=False: bar fills from left; value range 0.0..1.0
+    Draws a styled horizontal axis bar.
+    lc = light fill color, dc = dark fill color
     """
+    f_lbl  = fonts["small"]
+    f_val  = fonts["mono"]
+    LBL_W  = 108
+    VAL_W  = 62
+    BAR_H  = 18
+    BAR_W  = avail_w - LBL_W - VAL_W - 10
+
+    bar_x  = x + LBL_W + 4
+    bar_y  = y + 1
+    val_x  = bar_x + BAR_W + 6
+
     # Label
-    lbl = font.render(label, True, COLOR_TEXT_DIM)
-    surf.blit(lbl, (x, y))
+    lbl = f_lbl.render(label, True, C_DIM)
+    surf.blit(lbl, (x, y + (BAR_H - lbl.get_height()) // 2))
 
-    bx = x + AXIS_LABEL_W
-    by = y
-    bw = AXIS_BAR_WIDTH
-    bh = AXIS_BAR_HEIGHT
+    # Track
+    outlined_rect(surf, (28, 34, 46), C_BORDER,
+                  pygame.Rect(bar_x, bar_y, BAR_W, BAR_H), r=3)
 
-    # Track background
-    pygame.draw.rect(surf, COLOR_BORDER, (bx, by, bw, bh), border_radius=3)
-
-    # Fill
+    # Fill — two-tone for depth
     clamped = max(-1.0, min(1.0, value))
     if bipolar:
-        mid = bx + bw // 2
-        fill_w = int(abs(clamped) * (bw // 2))
-        if clamped >= 0:
-            fill_rect = pygame.Rect(mid, by + 1, fill_w, bh - 2)
-        else:
-            fill_rect = pygame.Rect(mid - fill_w, by + 1, fill_w, bh - 2)
+        mid     = bar_x + BAR_W // 2
+        fill_px = int(abs(clamped) * (BAR_W // 2))
+        fill_x  = mid if clamped >= 0 else mid - fill_px
+        if fill_px > 0:
+            filled_rect(surf, dc,
+                pygame.Rect(fill_x, bar_y + 1, fill_px, BAR_H - 2), r=2)
+            thin = BAR_H // 3
+            filled_rect(surf, lc,
+                pygame.Rect(fill_x, bar_y + thin, fill_px, thin), r=1)
+        # Center tick
+        pygame.draw.line(surf, C_TEXT, (mid, bar_y + 2), (mid, bar_y + BAR_H - 2), 1)
     else:
-        fill_w = int(clamped * bw)
-        fill_rect = pygame.Rect(bx, by + 1, fill_w, bh - 2)
+        fill_px = int(clamped * BAR_W)
+        if fill_px > 0:
+            filled_rect(surf, dc,
+                pygame.Rect(bar_x, bar_y + 1, fill_px, BAR_H - 2), r=2)
+            thin = BAR_H // 3
+            filled_rect(surf, lc,
+                pygame.Rect(bar_x, bar_y + thin, fill_px, thin), r=1)
 
-    if fill_rect.width > 0:
-        pygame.draw.rect(surf, color, fill_rect, border_radius=2)
-
-    # Center line (bipolar only)
+    # Position indicator dot
     if bipolar:
-        cx = bx + bw // 2
-        pygame.draw.line(surf, COLOR_CENTER_LINE, (cx, by), (cx, by + bh))
+        dot_x = bar_x + BAR_W // 2 + int(clamped * (BAR_W // 2))
+    else:
+        dot_x = bar_x + int(clamped * BAR_W)
+    dot_x = max(bar_x + 4, min(bar_x + BAR_W - 4, dot_x))
+    pygame.draw.circle(surf, C_BORDER, (dot_x, bar_y + BAR_H // 2), 7)
+    pygame.draw.circle(surf, lc,       (dot_x, bar_y + BAR_H // 2), 5)
+    pygame.draw.circle(surf, C_WHITE,  (dot_x, bar_y + BAR_H // 2), 2)
 
-    # Numeric value
-    val_lbl = font.render(f"{value:+.2f}", True, COLOR_TEXT)
-    surf.blit(val_lbl, (bx + bw + 6, by))
-
-
-def draw_button_led(surf: pygame.Surface,
-                    font: pygame.font.Font,
-                    cx: int, cy: int,
-                    label: str,
-                    pressed: bool) -> None:
-    """Draw a circular LED indicator with a label."""
-    color  = COLOR_GREEN     if pressed else COLOR_DARK_GRAY
-    border = COLOR_GREEN_DIM if pressed else COLOR_BORDER
-    pygame.draw.circle(surf, color,  (cx, cy), BUTTON_LED_RADIUS)
-    pygame.draw.circle(surf, border, (cx, cy), BUTTON_LED_RADIUS, 1)
-    lbl = font.render(label, True, COLOR_TEXT if pressed else COLOR_TEXT_DIM)
-    surf.blit(lbl, (cx + BUTTON_LED_RADIUS + BUTTON_LABEL_OFFSET, cy - lbl.get_height() // 2))
+    # Value text
+    fmt   = f"{value:+.2f}" if bipolar else f"{value:.2f}"
+    v_lbl = f_val.render(fmt, True, C_TEXT)
+    surf.blit(v_lbl, (val_x, y + (BAR_H - v_lbl.get_height()) // 2))
 
 
-def draw_hat_indicator(surf: pygame.Surface,
-                       font: pygame.font.Font,
-                       x: int, y: int,
-                       label: str,
-                       hat_x: int, hat_y: int) -> None:
+def draw_stick_2d(surf, x, y, size, sx, sy):
+    """2-D crosshair joystick position plot."""
+    cx, cy = x + size // 2, y + size // 2
+    r      = size // 2 - 4
+
+    outlined_rect(surf, (18, 22, 32), C_BORDER,
+                  pygame.Rect(x, y, size, size), r=5)
+
+    # Grid lines
+    pygame.draw.line(surf, C_BORDER, (x + 6, cy),  (x + size - 6, cy),  1)
+    pygame.draw.line(surf, C_BORDER, (cx, y + 6),  (cx, y + size - 6),  1)
+
+    # Dot position
+    dx = cx + int(sx * r)
+    dy = cy + int(sy * r)
+    dx = max(x + 6, min(x + size - 6, dx))
+    dy = max(y + 6, min(y + size - 6, dy))
+
+    pygame.draw.circle(surf, C_GREEN3,  (dx, dy), 10)
+    pygame.draw.circle(surf, C_GREEN2,  (dx, dy),  7)
+    pygame.draw.circle(surf, C_GREEN,   (dx, dy),  4)
+    pygame.draw.circle(surf, C_WHITE,   (dx, dy),  2)
+
+
+def draw_dpad(surf, fonts, x, y, label, hx, hy,
+              push_btn_code=None, buttons_state=None):
     """
-    Draw a 4-arrow hat indicator.
-    hat_x / hat_y: -1, 0, or 1.
+    Draw a D-pad (cross-shaped hat indicator).
+    push_btn_code: if set, also show a centre push indicator.
     """
-    cx = x + HAT_BOX_SIZE // 2
-    cy = y + HAT_BOX_SIZE // 2 + 10
-    sz = HAT_BOX_SIZE
-
-    # Box
-    pygame.draw.rect(surf, COLOR_PANEL_BG, (x, y + 10, sz, sz), border_radius=4)
-    pygame.draw.rect(surf, COLOR_BORDER,   (x, y + 10, sz, sz), width=1, border_radius=4)
+    SIZE  = 66
+    ARM_W = SIZE // 4
+    ARM_H = SIZE // 3 + 2
+    cx, cy = x + SIZE // 2, y + SIZE // 2
 
     # Label above
-    lbl = font.render(label, True, COLOR_TEXT_HEADER)
-    surf.blit(lbl, (x + sz // 2 - lbl.get_width() // 2, y - 2))
+    f = fonts["tiny"]
+    lbl = f.render(label, True, C_AMBER)
+    surf.blit(lbl, (x + SIZE // 2 - lbl.get_width() // 2, y - 14))
 
-    al = HAT_ARROW_LEN
-    directions = {
-        "U": ((cx, cy), (cx, cy - al),      hat_y == -1),
-        "D": ((cx, cy), (cx, cy + al),      hat_y ==  1),
-        "L": ((cx, cy), (cx - al, cy),      hat_x == -1),
-        "R": ((cx, cy), (cx + al, cy),      hat_x ==  1),
+    # Background square
+    outlined_rect(surf, (18, 22, 32), C_BORDER,
+                  pygame.Rect(x, y, SIZE, SIZE), r=4)
+
+    # D-pad arms
+    arms = {
+        "U": pygame.Rect(cx - ARM_W // 2, y + 3,          ARM_W, ARM_H),
+        "D": pygame.Rect(cx - ARM_W // 2, cy + ARM_W // 2, ARM_W, ARM_H),
+        "L": pygame.Rect(x + 3,          cy - ARM_W // 2, ARM_H, ARM_W),
+        "R": pygame.Rect(cx + ARM_W // 2, cy - ARM_W // 2, ARM_H, ARM_W),
     }
-    for _, (start, end, active) in directions.items():
-        color = COLOR_GREEN if active else COLOR_TEXT_DIM
-        pygame.draw.line(surf, color, start, end, 3 if active else 1)
-        # Arrowhead dot
-        pygame.draw.circle(surf, color, end, 3 if active else 2)
+    active = (hy == -1 and "U" or hy == 1 and "D" or
+              hx == -1 and "L" or hx == 1 and "R" or None)
 
-    # Centre dot — green when any direction active
-    any_active = hat_x != 0 or hat_y != 0
-    pygame.draw.circle(surf, COLOR_GREEN if any_active else COLOR_BORDER, (cx, cy), 4)
+    for d, rect in arms.items():
+        clr = C_DPAD_ON if d == active else C_DPAD_OFF
+        filled_rect(surf, clr, rect, r=2)
+        if d == active:                       # bright edge highlight
+            pygame.draw.rect(surf, C_GREEN, rect, width=1, border_radius=2)
 
-
-def draw_connection_badge(surf: pygame.Surface,
-                          font: pygame.font.Font,
-                          x: int, y: int,
-                          label: str,
-                          connected: bool) -> None:
-    color = COLOR_GREEN if connected else COLOR_RED
-    text  = f"{label}: {'CONNECTED' if connected else 'DISCONNECTED'}"
-    lbl = font.render(text, True, color)
-    surf.blit(lbl, (x, y))
+    # Centre push indicator
+    push_active = (push_btn_code is not None and
+                   buttons_state is not None and
+                   buttons_state.get(push_btn_code, False))
+    ctr_rect = pygame.Rect(cx - ARM_W // 2, cy - ARM_W // 2, ARM_W, ARM_W)
+    ctr_clr  = C_AMBER if push_active else (28, 34, 46)
+    filled_rect(surf, ctr_clr, ctr_rect, r=2)
 
 
-# =============================================================================
-# High-level section renderers
-# =============================================================================
+def draw_button_led(surf, fonts, x, y, name, pressed):
+    """LED circle + label.  Glow rings when pressed."""
+    R = 8
+    if pressed:
+        pygame.draw.circle(surf, C_GREEN3, (x, y), R + 5)
+        pygame.draw.circle(surf, C_GREEN2, (x, y), R + 2)
+        pygame.draw.circle(surf, C_GREEN,  (x, y), R)
+    else:
+        pygame.draw.circle(surf, C_BTN_OFF, (x, y), R)
+    pygame.draw.circle(surf, C_BORDER, (x, y), R, 1)
 
-def render_axes_panel(surf: pygame.Surface,
-                      font_h: pygame.font.Font,
-                      font: pygame.font.Font,
-                      rect: pygame.Rect,
-                      title: str,
-                      axes_state: dict,
-                      axis_map: dict,
-                      axis_lookup: dict,
-                      color: tuple) -> None:
-    draw_panel(surf, rect, title, font_h)
-    row_h = AXIS_BAR_HEIGHT + 8
-    y = rect.y + 26
+    f   = fonts["small"]
+    lbl = f.render(name, True, C_GREEN if pressed else C_DIM)
+    surf.blit(lbl, (x + R + 5, y - lbl.get_height() // 2))
+
+
+def draw_status_pill(surf, fonts, x, y, label, ok):
+    """Rounded badge: device name + CONNECTED / DISCONNECTED."""
+    f    = fonts["bold"]
+    color = C_GREEN if ok else C_RED
+    dot_r = 5
+    # Dot
+    pygame.draw.circle(surf, color, (x + dot_r, y + dot_r), dot_r)
+    # Text
+    txt = f.render(f"  {label}:  {'CONNECTED' if ok else 'DISCONNECTED'}", True, color)
+    surf.blit(txt, (x + dot_r * 2 + 4, y + dot_r - txt.get_height() // 2))
+
+
+def draw_section_header(surf, fonts, rect, title):
+    """Panel background + top title strip."""
+    outlined_rect(surf, C_PANEL, C_BORDER, rect, r=5)
+    f   = fonts["bold"]
+    lbl = f.render(title, True, C_AMBER)
+    surf.blit(lbl, (rect.x + PAD, rect.y + 4))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LIVE tab — section renderers
+# ═════════════════════════════════════════════════════════════════════════════
+
+def render_axes(surf, fonts, rect, axes_state, axis_map, axis_lu,
+                lc, dc, show_2d=False, sx=0.0, sy=0.0):
+    draw_section_header(surf, fonts, rect, "AXES")
+    y0 = rect.y + 24
+    PLOT_SIZE = 100
+
+    if show_2d:
+        draw_stick_2d(surf, rect.x + PAD, y0 + 8, PLOT_SIZE, sx, sy)
+        bar_x     = rect.x + PAD + PLOT_SIZE + 10
+        avail_w   = rect.right - bar_x - PAD
+    else:
+        bar_x     = rect.x + PAD
+        avail_w   = rect.width - PAD * 2
+
+    row_h = 26
+    by    = y0 + 12
     for code, info in axis_map.items():
-        if y + row_h > rect.bottom - 4:
-            break
-        value = axes_state.get(code, 0.0)
-        draw_axis_bar(
-            surf, font,
-            rect.x + SECTION_PAD, y,
-            info["name"], value, info["bipolar"], color,
-        )
-        y += row_h
+        if by + row_h > rect.bottom - 4: break
+        val = axes_state.get(code, 0.0)
+        draw_axis_bar(surf, fonts, bar_x, by, avail_w,
+                      info["name"], val, info["bipolar"], lc, dc)
+        by += row_h
 
 
-def render_buttons_panel(surf: pygame.Surface,
-                         font_h: pygame.font.Font,
-                         font: pygame.font.Font,
-                         rect: pygame.Rect,
-                         title: str,
-                         buttons_state: dict,
-                         button_map: dict,
-                         button_groups: list) -> None:
-    draw_panel(surf, rect, title, font_h)
+def render_hats(surf, fonts, rect, title,
+                hats_state, hat_map,
+                buttons_state=None, hat_btn_groups=None, button_map=None):
+    draw_section_header(surf, fonts, rect, title)
 
-    x0 = rect.x + SECTION_PAD
-    y0 = rect.y + 26
+    DPAD_SZ    = 66
+    DPAD_TOTAL = DPAD_SZ + 24   # includes label space above
+    gap        = 14
+    x0         = rect.x + PAD
+    y0         = rect.y + 22
 
-    col = 0
-    row = 0
-    max_cols = max(1, (rect.width - 2 * SECTION_PAD) // BUTTON_COL_W)
+    # ABS-reported hats
+    for key, hd in hat_map.items():
+        hx, hy = hats_state.get(key, (0, 0))
+        draw_dpad(surf, fonts, x0, y0 + 14, hd["name"][:10], hx, hy)
+        x0 += DPAD_TOTAL + gap
 
-    for group_key, group_label in button_groups:
-        group_btns = [
-            (code, info)
-            for code, info in button_map.items()
-            if info["group"] == group_key
-        ]
-        if not group_btns:
-            continue
-
-        # Group header — if we're mid-row start a new row
-        if col != 0:
-            row += 1
-            col = 0
-
-        # Draw group label
-        glbl = font.render(group_label, True, COLOR_AMBER)
-        gy = y0 + row * BUTTON_ROW_H
-        if gy + BUTTON_ROW_H > rect.bottom - 4:
-            break
-        surf.blit(glbl, (x0, gy))
-        row += 1
-        col = 0
-
-        for code, info in sorted(group_btns, key=lambda b: b[1]["dx"]):
-            cx = x0 + col * BUTTON_COL_W + BUTTON_LED_RADIUS
-            cy = y0 + row * BUTTON_ROW_H + BUTTON_LED_RADIUS
-            if cy + BUTTON_LED_RADIUS > rect.bottom - 4:
-                break
-            pressed = buttons_state.get(code, False)
-            draw_button_led(surf, font, cx, cy, info["name"], pressed)
-            col += 1
-            if col >= max_cols:
-                col = 0
-                row += 1
-
-        row += 1
-        col = 0
-
-
-def render_hats_panel(surf: pygame.Surface,
-                      font_h: pygame.font.Font,
-                      font: pygame.font.Font,
-                      rect: pygame.Rect,
-                      title: str,
-                      hats_state: dict,
-                      hat_map: dict,
-                      # also include 4-way hat-button groups (TMS/DMS/CMS)
-                      buttons_state: dict | None = None,
-                      hat_button_groups: list | None = None,
-                      button_map: dict | None = None) -> None:
-    draw_panel(surf, rect, title, font_h)
-
-    x = rect.x + SECTION_PAD
-    y = rect.y + 26
-
-    # ABS hat axes
-    for hat_key, hat_def in hat_map.items():
-        hx, hy = hats_state.get(hat_key, (0, 0))
-        draw_hat_indicator(surf, font, x, y, hat_def["name"], hx, hy)
-        x += HAT_BOX_SIZE + SECTION_GAP + 10
-        if x + HAT_BOX_SIZE > rect.right:
-            x = rect.x + SECTION_PAD
-            y += HAT_BOX_SIZE + 20
-
-    # Hat-button groups rendered as mini LED clusters
-    if buttons_state and hat_button_groups and button_map:
-        for group_key, group_label in hat_button_groups:
-            group_btns = sorted(
-                [(c, i) for c, i in button_map.items() if i["group"] == group_key],
-                key=lambda b: b[1]["dx"],
-            )
-            if not group_btns:
-                continue
-
-            # Derive (x,y) from active button
-            hat_x, hat_y = 0, 0
-            for code, info in group_btns:
+    # Button-reported 4-way hats (TMS / DMS / CMS)
+    if hat_btn_groups and button_map and buttons_state is not None:
+        CMS_PUSH = {706}   # H4P evdev code
+        for grp_key, grp_label in hat_btn_groups:
+            grp = [(c, i) for c, i in button_map.items() if i["group"] == grp_key]
+            if not grp: continue
+            hx = hy = 0
+            for code, info in grp:
                 if buttons_state.get(code, False):
                     nm = info["name"]
-                    if nm.endswith("U"):
-                        hat_y = -1
-                    elif nm.endswith("D"):
-                        hat_y =  1
-                    elif nm.endswith("L"):
-                        hat_x = -1
-                    elif nm.endswith("R"):
-                        hat_x =  1
-
-            if x + HAT_BOX_SIZE > rect.right:
-                x = rect.x + SECTION_PAD
-                y += HAT_BOX_SIZE + 20
-
-            draw_hat_indicator(surf, font, x, y, group_label, hat_x, hat_y)
-            x += HAT_BOX_SIZE + SECTION_GAP + 10
+                    if nm.endswith("U"): hy = -1
+                    elif nm.endswith("D"): hy = 1
+                    elif nm.endswith("L"): hx = -1
+                    elif nm.endswith("R"): hx = 1
+            # CMS push code
+            push_code = next((c for c, i in grp if i["name"] == "H4P"), None)
+            if x0 + DPAD_TOTAL > rect.right: break
+            draw_dpad(surf, fonts, x0, y0 + 14, grp_label, hx, hy,
+                      push_btn_code=push_code, buttons_state=buttons_state)
+            x0 += DPAD_TOTAL + gap
 
 
-# =============================================================================
-# Startup helpers
-# =============================================================================
+def render_buttons(surf, fonts, rect, title,
+                   buttons_state, button_map, button_groups,
+                   n_cols=4):
+    draw_section_header(surf, fonts, rect, title)
 
-def print_no_device_error() -> None:
-    print("\n[ERROR] No Thrustmaster HOTAS Warthog device found.")
-    print("  Check USB:     lsusb | grep -i 044f")
-    print("  Check devices: cat /proc/bus/input/devices | grep -i warthog")
-    print("  Check perms:   sudo usermod -aG input $USER  (then re-login)")
-    print()
+    col_w    = (rect.width - PAD * 2) // n_cols
+    GRP_H    = 18   # group label row height
+    BTN_H    = 22   # button row height
+
+    x0 = rect.x + PAD
+    y0 = rect.y + 24
+    cy = y0
+
+    f_grp = fonts["tiny_bold"]
+    f_btn = fonts["small"]
+
+    for grp_key, grp_label in button_groups:
+        grp_btns = sorted(
+            [(c, i) for c, i in button_map.items() if i["group"] == grp_key],
+            key=lambda b: b[1]["dx"])
+        if not grp_btns: continue
+
+        # Group header
+        if cy + GRP_H > rect.bottom - 4: break
+        lbl = f_grp.render(grp_label.upper(), True, C_AMBER)
+        surf.blit(lbl, (x0, cy))
+        cy += GRP_H
+
+        # Button grid
+        col = 0
+        for code, info in grp_btns:
+            if cy + BTN_H > rect.bottom - 4: break
+            bx = x0 + col * col_w + 10
+            by = cy + BTN_H // 2
+            if bx + col_w > rect.right: break
+            pressed = buttons_state.get(code, False)
+            draw_button_led(surf, fonts, bx, by, info["name"], pressed)
+            col += 1
+            if col >= n_cols:
+                col = 0
+                cy += BTN_H
+        if col > 0:
+            cy += BTN_H
+        cy += 2   # small gap between groups
 
 
-# =============================================================================
+def render_live_tab(surf, fonts, state, s_lu, t_lu):
+    """Render the full LIVE input view."""
+
+    # ── left column — stick ────────────────────────────────────────────────
+    # Device header
+    hdr_r = pygame.Rect(4, TAB_H + 2, COL_W - 8, DEV_HDR_H)
+    outlined_rect(surf, C_PANEL, C_BORDER, hdr_r, r=4)
+    draw_status_pill(surf, fonts, hdr_r.x + PAD, hdr_r.y + 8,
+                     "JOYSTICK STICK", state["stick_ok"])
+
+    ax_r  = pygame.Rect(4, CONTENT_TOP,       COL_W - 8, AXES_H)
+    ht_r  = pygame.Rect(4, AXES_BOTTOM,        COL_W - 8, HATS_H)
+    bt_r  = pygame.Rect(4, HATS_BOTTOM,        COL_W - 8, BTNS_H)
+
+    sx = state["stick_axes"].get(0, 0.0)   # code 0 = ABS_X
+    sy = state["stick_axes"].get(1, 0.0)   # code 1 = ABS_Y
+
+    render_axes(surf, fonts, ax_r,
+                state["stick_axes"], STICK_AXIS_MAP, s_lu,
+                C_BLUE, C_BLUE_D,
+                show_2d=True, sx=sx, sy=sy)
+
+    render_hats(surf, fonts, ht_r, "HATS",
+                state["stick_hats"], STICK_HAT_MAP,
+                state["stick_buttons"],
+                [("tms","TMS"), ("dms","DMS"), ("cms","CMS")],
+                STICK_BUTTON_MAP)
+
+    render_buttons(surf, fonts, bt_r, "BUTTONS",
+                   state["stick_buttons"],
+                   STICK_BUTTON_MAP, STICK_BUTTON_GROUPS, n_cols=4)
+
+    # ── right column — throttle ────────────────────────────────────────────
+    RX = COL_W + 4
+    hdr_r2 = pygame.Rect(RX, TAB_H + 2, COL_W - 8, DEV_HDR_H)
+    outlined_rect(surf, C_PANEL, C_BORDER, hdr_r2, r=4)
+    draw_status_pill(surf, fonts, hdr_r2.x + PAD, hdr_r2.y + 8,
+                     "THROTTLE UNIT", state["throttle_ok"])
+
+    ax_r2  = pygame.Rect(RX, CONTENT_TOP,  COL_W - 8, AXES_H)
+    ht_r2  = pygame.Rect(RX, AXES_BOTTOM,  COL_W - 8, HATS_H)
+    bt_r2  = pygame.Rect(RX, HATS_BOTTOM,  COL_W - 8, BTNS_H)
+
+    render_axes(surf, fonts, ax_r2,
+                state["throttle_axes"], THROTTLE_AXIS_MAP, t_lu,
+                C_TEAL, C_TEAL_D,
+                show_2d=False)
+
+    render_hats(surf, fonts, ht_r2, "COOLIE SWITCH",
+                state["throttle_hats"], THROTTLE_HAT_MAP)
+
+    render_buttons(surf, fonts, bt_r2, "BUTTONS",
+                   state["throttle_buttons"],
+                   THROTTLE_BUTTON_MAP, THROTTLE_BUTTON_GROUPS, n_cols=5)
+
+    # ── column divider ─────────────────────────────────────────────────────
+    v_separator(surf, COL_W)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MAP tab — button reference table
+# ═════════════════════════════════════════════════════════════════════════════
+
+def render_table(surf, fonts, rect, title, button_map, buttons_state,
+                 scroll_y=0):
+    """
+    Scrollable reference table: DX | Code | Name | Description | Status
+    Rows highlight green when the button is pressed.
+    """
+    draw_section_header(surf, fonts, rect, title)
+
+    # Column widths
+    C1 = 28    # DX
+    C2 = 46    # hex code
+    C3 = 62    # name
+    CREST = rect.width - C1 - C2 - C3 - PAD * 2 - 70  # description
+    C4 = CREST
+    C5 = 70    # status
+
+    HDR_H  = 22
+    ROW_H  = 21
+    CLIP_Y = rect.y + 24
+    CLIP_H = rect.height - 24
+
+    f_hdr  = fonts["tiny_bold"]
+    f_row  = fonts["tiny"]
+    f_val  = fonts["mono"]
+
+    # Table header row
+    hx = rect.x + PAD
+    hy = CLIP_Y
+    cols = [
+        (C1,  "DX"),
+        (C2,  "CODE"),
+        (C3,  "NAME"),
+        (C4,  "DESCRIPTION"),
+        (C5,  "STATE"),
+    ]
+    pygame.draw.rect(surf, (28, 34, 50),
+                     pygame.Rect(rect.x, hy, rect.width, HDR_H))
+    hx2 = hx
+    for cw, ch in cols:
+        lbl = f_hdr.render(ch, True, C_AMBER)
+        surf.blit(lbl, (hx2, hy + 4))
+        hx2 += cw
+
+    pygame.draw.line(surf, C_BORDER,
+                     (rect.x, hy + HDR_H - 1),
+                     (rect.right, hy + HDR_H - 1), 1)
+
+    # Clip region for rows
+    clip = pygame.Rect(rect.x, CLIP_Y + HDR_H, rect.width, CLIP_H - HDR_H)
+    surf.set_clip(clip)
+
+    sorted_btns = sorted(button_map.items(), key=lambda kv: kv[1]["dx"])
+    ry = CLIP_Y + HDR_H - scroll_y
+
+    for idx, (code, info) in enumerate(sorted_btns):
+        if ry + ROW_H < clip.top:
+            ry += ROW_H; continue
+        if ry >= clip.bottom: break
+
+        pressed  = buttons_state.get(code, False)
+        row_bg   = C_ROW_HIT if pressed else (C_ROW_ODD if idx % 2 else C_ROW_EVEN)
+        pygame.draw.rect(surf, row_bg, pygame.Rect(rect.x, ry, rect.width, ROW_H))
+
+        fx = rect.x + PAD
+        txt_color = C_GREEN if pressed else C_TEXT
+
+        cells = [
+            (C1, f_row, f"{info['dx']:>2}",     C_DIM),
+            (C2, f_val, f"0x{code:03X}",        C_DIM),
+            (C3, f_row, info["name"],            C_GREEN if pressed else C_AMBER),
+            (C4, f_row, info["desc"],            txt_color),
+            (C5, f_row, "PRESSED" if pressed else "·",
+                        C_GREEN if pressed else C_DIM),
+        ]
+        for cw, cf, ct, cc in cells:
+            # Truncate text to fit column
+            t = cf.render(ct, True, cc)
+            if t.get_width() > cw - 4:
+                while ct and cf.render(ct + "…", True, cc).get_width() > cw - 4:
+                    ct = ct[:-1]
+                t = cf.render(ct + "…", True, cc)
+            surf.blit(t, (fx, ry + (ROW_H - t.get_height()) // 2))
+            fx += cw
+
+        ry += ROW_H
+
+    surf.set_clip(None)
+
+    # scroll bar hint
+    all_rows   = len(button_map)
+    total_h    = all_rows * ROW_H
+    visible_h  = CLIP_H - HDR_H
+    if total_h > visible_h:
+        bar_h = max(20, int(visible_h * visible_h / total_h))
+        bar_y = CLIP_Y + HDR_H + int(scroll_y / (total_h - visible_h) *
+                                      (visible_h - bar_h))
+        pygame.draw.rect(surf, C_BORDER,
+                         pygame.Rect(rect.right - 4, bar_y, 3, bar_h), border_radius=2)
+
+
+def render_map_tab(surf, fonts, state, scroll_s, scroll_t):
+    """Render the full BUTTON MAP reference view."""
+
+    half = W // 2 - 4
+    left_r  = pygame.Rect(4,       TAB_H + 2, half, H - FOOT_H - TAB_H - 4)
+    right_r = pygame.Rect(half+8,  TAB_H + 2, half, H - FOOT_H - TAB_H - 4)
+
+    render_table(surf, fonts, left_r,
+                 "JOYSTICK STICK  —  Button Reference",
+                 STICK_BUTTON_MAP, state["stick_buttons"], scroll_s)
+
+    render_table(surf, fonts, right_r,
+                 "THROTTLE UNIT  —  Button Reference",
+                 THROTTLE_BUTTON_MAP, state["throttle_buttons"], scroll_t)
+
+    v_separator(surf, W // 2)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Tab bar
+# ═════════════════════════════════════════════════════════════════════════════
+
+def render_header(surf, fonts, current_tab, fps, state):
+    """Top bar: title, tab buttons, FPS."""
+    pygame.draw.rect(surf, (16, 20, 28), pygame.Rect(0, 0, W, TAB_H))
+    pygame.draw.line(surf, C_BORDER, (0, TAB_H - 1), (W, TAB_H - 1), 1)
+
+    # Title
+    f_t  = fonts["title"]
+    t1   = f_t.render("HOTAS WARTHOG", True, C_AMBER)
+    t2   = f_t.render("  A-10C  DASHBOARD", True, C_TEXT)
+    surf.blit(t1, (PAD * 2, 14))
+    surf.blit(t2, (PAD * 2 + t1.get_width(), 14))
+
+    # Tab buttons
+    tabs = [(TAB_LIVE, "  LIVE INPUT  "), (TAB_MAP, "  BUTTON MAP  ")]
+    tx   = W - 340
+    tab_rects = []
+    for tab_id, tab_lbl in tabs:
+        active = tab_id == current_tab
+        bg  = C_AMBER_D if active else (25, 30, 42)
+        bdr = C_AMBER   if active else C_BORDER
+        r   = pygame.Rect(tx, 10, 148, 32)
+        outlined_rect(surf, bg, bdr, r, r=4)
+        f   = fonts["bold"]
+        lbl = f.render(tab_lbl, True, C_AMBER if active else C_DIM)
+        surf.blit(lbl, (r.centerx - lbl.get_width() // 2,
+                        r.centery - lbl.get_height() // 2))
+        tab_rects.append((r, tab_id))
+        tx += 156
+
+    # FPS + device events
+    f_s = fonts["tiny"]
+    info = (f"  FPS {fps:4.0f}"
+            f"  |  Stick ev/s {state['s_eps']:3d}"
+            f"  |  Throttle ev/s {state['t_eps']:3d}"
+            f"  |  ESC = quit   TAB = switch view")
+    lbl = f_s.render(info, True, C_DIM)
+    surf.blit(lbl, (PAD * 2, TAB_H - lbl.get_height() - 4))
+
+    return tab_rects
+
+
+def render_footer(surf, fonts):
+    pygame.draw.rect(surf, (14, 18, 25),
+                     pygame.Rect(0, H - FOOT_H, W, FOOT_H))
+    pygame.draw.line(surf, C_BORDER, (0, H - FOOT_H), (W, H - FOOT_H), 1)
+    f = fonts["tiny"]
+    lbl = f.render(
+        "  Thrustmaster HOTAS Warthog  |  VID:044F  "
+        "Stick PID:0402  Throttle PID:0404  |  "
+        "github/HOTAS-WARTHOG-USAF-A10C-Interface", True, C_DIM)
+    surf.blit(lbl, (PAD, H - FOOT_H + (FOOT_H - lbl.get_height()) // 2))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Font loader
+# ═════════════════════════════════════════════════════════════════════════════
+
+def load_fonts():
+    """
+    Try to load nicer system fonts; fall back gracefully to monospace.
+    Returns a dict of named font objects.
+    """
+    def sf(names, size, bold=False):
+        for n in names:
+            try:
+                f = pygame.font.SysFont(n, size, bold=bold)
+                # Quick test — SysFont never raises but can return default
+                return f
+            except Exception:
+                pass
+        return pygame.font.SysFont("monospace", size, bold=bold)
+
+    SANS  = ["dejavusans", "ubuntu", "liberation sans", "arial", "freesans"]
+    MONO  = ["dejavusansmono", "ubuntumono", "liberationmono",
+             "couriernew", "monospace"]
+
+    return {
+        "title":     sf(SANS, 20, bold=True),
+        "bold":      sf(SANS, 13, bold=True),
+        "small":     sf(SANS, 12),
+        "tiny":      sf(SANS, 11),
+        "tiny_bold": sf(SANS, 11, bold=True),
+        "mono":      sf(MONO, 12),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Main
-# =============================================================================
+# ═════════════════════════════════════════════════════════════════════════════
 
-def main() -> int:
-    # ------------------------------------------------------------------
-    # 1. Load JSON mappings from scan_joystick.py output (if available)
-    # ------------------------------------------------------------------
-    stick_json    = _load_json(STICK_JSON)
-    throttle_json = _load_json(THROTTLE_JSON)
+def main():
+    # 1. Load JSON mappings
+    s_js = _load_json(STICK_JSON)
+    t_js = _load_json(THROTTLE_JSON)
+    if not s_js:
+        print("[INFO] warthog_stick_map.json not found — using auto-detect")
+    if not t_js:
+        print("[INFO] warthog_throttle_map.json not found — using auto-detect")
 
-    if not stick_json:
-        print("[INFO] output/warthog_stick_map.json not found — using auto-detect.")
-    if not throttle_json:
-        print("[INFO] output/warthog_throttle_map.json not found — using auto-detect.")
-
-    # ------------------------------------------------------------------
     # 2. Resolve device paths
-    # ------------------------------------------------------------------
-    auto_stick, auto_throttle = auto_detect_warthog()
+    a_sp, a_tp    = auto_detect()
+    stick_path    = resolve_path(s_js, a_sp)
+    throttle_path = resolve_path(t_js, a_tp)
 
-    stick_path    = resolve_device_path(stick_json,    auto_stick)
-    throttle_path = resolve_device_path(throttle_json, auto_throttle)
+    if not stick_path and not throttle_path:
+        print("\n[WARNING] No Warthog device found — running in demo mode.")
+        print("  Plug in the HOTAS, then restart the dashboard.\n")
 
-    if stick_path is None and throttle_path is None:
-        print_no_device_error()
-        # We continue anyway so the user can see the dashboard in
-        # "no-device" mode (all indicators grey / disconnected).
+    # 3. Axis lookup tables
+    s_lu = build_axis_lookup(s_js, STICK_AXIS_MAP)
+    t_lu = build_axis_lookup(t_js, THROTTLE_AXIS_MAP)
 
-    # ------------------------------------------------------------------
-    # 3. Build axis lookup tables (range info for normalisation)
-    # ------------------------------------------------------------------
-    stick_axis_lookup    = build_axis_lookup(stick_json,    STICK_AXIS_MAP)
-    throttle_axis_lookup = build_axis_lookup(throttle_json, THROTTLE_AXIS_MAP)
-
-    # ------------------------------------------------------------------
     # 4. Shared state
-    # ------------------------------------------------------------------
     shared = SharedState()
 
-    # ------------------------------------------------------------------
-    # 5. Spawn input threads (daemon — die with main thread)
-    # ------------------------------------------------------------------
+    # 5. Input threads
     if stick_path:
-        t_stick = threading.Thread(
-            target=input_reader,
-            args=(stick_path, "stick", stick_axis_lookup, STICK_HAT_MAP, shared),
-            daemon=True,
-        )
-        t_stick.start()
-
+        threading.Thread(target=input_reader,
+                         args=(stick_path, "stick",
+                               s_lu, STICK_HAT_MAP, shared),
+                         daemon=True).start()
     if throttle_path:
-        t_throttle = threading.Thread(
-            target=input_reader,
-            args=(throttle_path, "throttle", throttle_axis_lookup, THROTTLE_HAT_MAP, shared),
-            daemon=True,
-        )
-        t_throttle.start()
+        threading.Thread(target=input_reader,
+                         args=(throttle_path, "throttle",
+                               t_lu, THROTTLE_HAT_MAP, shared),
+                         daemon=True).start()
 
-    # ------------------------------------------------------------------
-    # 6. Pygame initialisation
-    # ------------------------------------------------------------------
+    # 6. Pygame init
     pygame.init()
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption(WINDOW_TITLE)
+    screen = pygame.display.set_mode((W, H), pygame.RESIZABLE)
+    pygame.display.set_caption("HOTAS Warthog A-10C Dashboard")
     clock  = pygame.time.Clock()
+    fonts  = load_fonts()
 
-    font_large  = pygame.font.SysFont("monospace", 20, bold=True)
-    font_medium = pygame.font.SysFont("monospace", 14, bold=True)
-    font_small  = pygame.font.SysFont("monospace", 12)
+    fullscreen  = False
+    current_tab = TAB_LIVE
+    scroll_s = scroll_t = 0     # MAP tab scroll offsets (pixels)
+    tab_rects: list = []
 
-    # ------------------------------------------------------------------
-    # 7. Layout constants (computed once)
-    # ------------------------------------------------------------------
-    H_HEADER  = 56
-    H_FOOTER  = 30
-    USABLE_H  = WINDOW_HEIGHT - H_HEADER - H_FOOTER
-    COL_W     = WINDOW_WIDTH // 2 - SECTION_GAP
+    # Pre-compute max scroll per table
+    ROW_H    = 21
+    HDR_H    = 22 + 24
+    VISIBLE  = H - FOOT_H - TAB_H - 4 - HDR_H
+    MAX_S    = max(0, len(STICK_BUTTON_MAP)    * ROW_H - VISIBLE)
+    MAX_T    = max(0, len(THROTTLE_BUTTON_MAP) * ROW_H - VISIBLE)
 
-    # Row splits inside each column
-    AXES_H    = 220
-    HATS_H    = 150
-    BTNS_H    = USABLE_H - AXES_H - HATS_H - SECTION_GAP * 2
-
-    # Left column (stick)
-    stick_axes_rect  = pygame.Rect(SECTION_GAP,  H_HEADER + SECTION_GAP,
-                                    COL_W, AXES_H)
-    stick_hats_rect  = pygame.Rect(SECTION_GAP,
-                                    stick_axes_rect.bottom + SECTION_GAP,
-                                    COL_W, HATS_H)
-    stick_btns_rect  = pygame.Rect(SECTION_GAP,
-                                    stick_hats_rect.bottom + SECTION_GAP,
-                                    COL_W, BTNS_H)
-
-    # Right column (throttle)
-    rx = WINDOW_WIDTH // 2 + SECTION_GAP
-    thr_axes_rect  = pygame.Rect(rx, H_HEADER + SECTION_GAP,
-                                  COL_W, AXES_H)
-    thr_hats_rect  = pygame.Rect(rx, thr_axes_rect.bottom + SECTION_GAP,
-                                  COL_W, HATS_H)
-    thr_btns_rect  = pygame.Rect(rx, thr_hats_rect.bottom + SECTION_GAP,
-                                  COL_W, BTNS_H)
-
-    # Hat button groups shown inside the hats panel
-    STICK_HAT_BTN_GROUPS  = [("tms", "TMS"), ("dms", "DMS"), ("cms", "CMS")]
-    THROTTLE_HAT_BTN_GROUPS = []   # throttle hat is ABS-only
-
-    # ------------------------------------------------------------------
-    # 8. Render loop
-    # ------------------------------------------------------------------
     running = True
-    stats_timer = time.monotonic()
-
     while running:
-        # ---- Events ------------------------------------------------------
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+        # ── events ──────────────────────────────────────────────────────────
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
                 running = False
 
-        # ---- Stats -------------------------------------------------------
-        shared.tick_stats()
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    running = False
+                elif ev.key in (pygame.K_TAB, pygame.K_m):
+                    current_tab = TAB_MAP if current_tab == TAB_LIVE else TAB_LIVE
+                elif ev.key == pygame.K_l:
+                    current_tab = TAB_LIVE
+                elif ev.key == pygame.K_f:
+                    fullscreen = not fullscreen
+                    flags = pygame.FULLSCREEN if fullscreen else pygame.RESIZABLE
+                    screen = pygame.display.set_mode((W, H), flags)
+
+            elif ev.type == pygame.MOUSEBUTTONDOWN:
+                if ev.button == 1:
+                    for r, tid in tab_rects:
+                        if r.collidepoint(ev.pos):
+                            current_tab = tid
+                elif ev.button == 4:   # scroll up
+                    if current_tab == TAB_MAP:
+                        mx = ev.pos[0]
+                        if mx < W // 2: scroll_s = max(0, scroll_s - ROW_H * 3)
+                        else:           scroll_t = max(0, scroll_t - ROW_H * 3)
+                elif ev.button == 5:   # scroll down
+                    if current_tab == TAB_MAP:
+                        mx = ev.pos[0]
+                        if mx < W // 2: scroll_s = min(MAX_S, scroll_s + ROW_H * 3)
+                        else:           scroll_t = min(MAX_T, scroll_t + ROW_H * 3)
+
+        # ── update state ─────────────────────────────────────────────────────
+        shared.tick()
         state = shared.snapshot()
 
-        # ---- Clear -------------------------------------------------------
-        screen.fill(COLOR_BG)
+        # ── render ───────────────────────────────────────────────────────────
+        screen.fill(C_BG)
 
-        # ---- Header ------------------------------------------------------
-        title_lbl = font_large.render(WINDOW_TITLE, True, COLOR_TEXT)
-        screen.blit(title_lbl, (SECTION_GAP, 10))
+        tab_rects = render_header(screen, fonts, current_tab,
+                                  clock.get_fps(), state)
 
-        draw_connection_badge(screen, font_medium,
-                              SECTION_GAP, 34,
-                              "Stick", state["stick_connected"])
-        draw_connection_badge(screen, font_medium,
-                              WINDOW_WIDTH // 2 + SECTION_GAP, 34,
-                              "Throttle", state["throttle_connected"])
+        if current_tab == TAB_LIVE:
+            render_live_tab(screen, fonts, state, s_lu, t_lu)
+        else:
+            render_map_tab(screen, fonts, state, scroll_s, scroll_t)
 
-        # ---- Stick axes --------------------------------------------------
-        render_axes_panel(
-            screen, font_medium, font_small,
-            stick_axes_rect, "STICK — AXES",
-            state["stick_axes"], STICK_AXIS_MAP, stick_axis_lookup,
-            COLOR_BLUE,
-        )
+        render_footer(screen, fonts)
 
-        # ---- Stick hats (ABS hat + TMS/DMS/CMS button-hats) -------------
-        render_hats_panel(
-            screen, font_medium, font_small,
-            stick_hats_rect, "STICK — HATS",
-            state["stick_hats"], STICK_HAT_MAP,
-            state["stick_buttons"], STICK_HAT_BTN_GROUPS, STICK_BUTTON_MAP,
-        )
-
-        # ---- Stick buttons -----------------------------------------------
-        render_buttons_panel(
-            screen, font_medium, font_small,
-            stick_btns_rect, "STICK — BUTTONS",
-            state["stick_buttons"], STICK_BUTTON_MAP, STICK_BUTTON_GROUPS,
-        )
-
-        # ---- Throttle axes -----------------------------------------------
-        render_axes_panel(
-            screen, font_medium, font_small,
-            thr_axes_rect, "THROTTLE — AXES",
-            state["throttle_axes"], THROTTLE_AXIS_MAP, throttle_axis_lookup,
-            COLOR_BLUE_TROT,
-        )
-
-        # ---- Throttle hats -----------------------------------------------
-        render_hats_panel(
-            screen, font_medium, font_small,
-            thr_hats_rect, "THROTTLE — HATS",
-            state["throttle_hats"], THROTTLE_HAT_MAP,
-        )
-
-        # ---- Throttle buttons --------------------------------------------
-        render_buttons_panel(
-            screen, font_medium, font_small,
-            thr_btns_rect, "THROTTLE — BUTTONS",
-            state["throttle_buttons"], THROTTLE_BUTTON_MAP, THROTTLE_BUTTON_GROUPS,
-        )
-
-        # ---- Footer ------------------------------------------------------
-        fps     = clock.get_fps()
-        ev_lbl  = (f"  FPS: {fps:>5.1f}"
-                   f"  |  Stick ev/s: {state['stick_events_sec']:>4}"
-                   f"  |  Throttle ev/s: {state['throttle_events_sec']:>4}"
-                   f"  |  ESC to quit")
-        foot = font_small.render(ev_lbl, True, COLOR_TEXT_DIM)
-        screen.blit(foot, (SECTION_GAP, WINDOW_HEIGHT - H_FOOTER + 6))
-
-        # ---- Flip --------------------------------------------------------
         pygame.display.flip()
         clock.tick(TARGET_FPS)
 
