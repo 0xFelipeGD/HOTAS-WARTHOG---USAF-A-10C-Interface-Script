@@ -1,0 +1,225 @@
+{
+  "device_type": "stick",
+  "device_path": "/dev/input/event21",
+  "device_name": "Thustmaster Joystick - HOTAS Warthog",
+  "vid": "044F",
+  "pid": "0402",
+  "scan_timestamp": "2026-04-02T09:48:30",
+  "axes": [
+    {
+      "code": 0,
+      "evdev_name": "ABS_X",
+      "official_name": "Stick X",
+      "description": "Roll  (left \u2190 \u2192 right)",
+      "bipolar": true,
+      "min": 0,
+      "max": 65535,
+      "fuzz": 255,
+      "flat": 4095,
+      "resolution": 0,
+      "is_hat": false
+    },
+    {
+      "code": 1,
+      "evdev_name": "ABS_Y",
+      "official_name": "Stick Y",
+      "description": "Pitch (fwd  \u2191 \u2193 back)",
+      "bipolar": true,
+      "min": 0,
+      "max": 65535,
+      "fuzz": 255,
+      "flat": 4095,
+      "resolution": 0,
+      "is_hat": false
+    },
+    {
+      "code": 16,
+      "evdev_name": "ABS_HAT0X",
+      "official_name": "ABS_HAT0X",
+      "description": "",
+      "bipolar": true,
+      "min": -1,
+      "max": 1,
+      "fuzz": 0,
+      "flat": 0,
+      "resolution": 0,
+      "is_hat": true
+    },
+    {
+      "code": 17,
+      "evdev_name": "ABS_HAT0Y",
+      "official_name": "ABS_HAT0Y",
+      "description": "",
+      "bipolar": true,
+      "min": -1,
+      "max": 1,
+      "fuzz": 0,
+      "flat": 0,
+      "resolution": 0,
+      "is_hat": true
+    }
+  ],
+  "buttons": [
+    {
+      "code": 288,
+      "evdev_name": "BTN_JOYSTICK",
+      "official_name": "TG1",
+      "description": "Primary Trigger \u2014 1st stage",
+      "group": "trigger",
+      "dx_number": 1
+    },
+    {
+      "code": 289,
+      "evdev_name": "BTN_THUMB",
+      "official_name": "S2",
+      "description": "Weapon Release Button",
+      "group": "buttons",
+      "dx_number": 2
+    },
+    {
+      "code": 290,
+      "evdev_name": "BTN_THUMB2",
+      "official_name": "S3",
+      "description": "Nosewheel Steering / Depress",
+      "group": "buttons",
+      "dx_number": 3
+    },
+    {
+      "code": 291,
+      "evdev_name": "BTN_TOP",
+      "official_name": "S4",
+      "description": "Pinky Lever",
+      "group": "buttons",
+      "dx_number": 4
+    },
+    {
+      "code": 292,
+      "evdev_name": "BTN_TOP2",
+      "official_name": "S1",
+      "description": "Paddle Switch (index finger)",
+      "group": "buttons",
+      "dx_number": 5
+    },
+    {
+      "code": 293,
+      "evdev_name": "BTN_PINKIE",
+      "official_name": "TG2",
+      "description": "Secondary Trigger \u2014 2nd stage",
+      "group": "trigger",
+      "dx_number": 6
+    },
+    {
+      "code": 294,
+      "evdev_name": "BTN_BASE",
+      "official_name": "H2U",
+      "description": "TMS Up",
+      "group": "tms",
+      "dx_number": 7
+    },
+    {
+      "code": 295,
+      "evdev_name": "BTN_BASE2",
+      "official_name": "H2R",
+      "description": "TMS Right",
+      "group": "tms",
+      "dx_number": 8
+    },
+    {
+      "code": 296,
+      "evdev_name": "BTN_BASE3",
+      "official_name": "H2D",
+      "description": "TMS Down",
+      "group": "tms",
+      "dx_number": 9
+    },
+    {
+      "code": 297,
+      "evdev_name": "BTN_BASE4",
+      "official_name": "H2L",
+      "description": "TMS Left",
+      "group": "tms",
+      "dx_number": 10
+    },
+    {
+      "code": 298,
+      "evdev_name": "BTN_BASE5",
+      "official_name": "H3U",
+      "description": "DMS Up",
+      "group": "dms",
+      "dx_number": 11
+    },
+    {
+      "code": 299,
+      "evdev_name": "BTN_BASE6",
+      "official_name": "H3R",
+      "description": "DMS Right",
+      "group": "dms",
+      "dx_number": 12
+    },
+    {
+      "code": 300,
+      "evdev_name": "?",
+      "official_name": "H3D",
+      "description": "DMS Down",
+      "group": "dms",
+      "dx_number": 13
+    },
+    {
+      "code": 301,
+      "evdev_name": "?",
+      "official_name": "H3L",
+      "description": "DMS Left",
+      "group": "dms",
+      "dx_number": 14
+    },
+    {
+      "code": 302,
+      "evdev_name": "?",
+      "official_name": "H4U",
+      "description": "CMS Up",
+      "group": "cms",
+      "dx_number": 15
+    },
+    {
+      "code": 303,
+      "evdev_name": "BTN_DEAD",
+      "official_name": "H4R",
+      "description": "CMS Right",
+      "group": "cms",
+      "dx_number": 16
+    },
+    {
+      "code": 704,
+      "evdev_name": "BTN_TRIGGER_HAPPY",
+      "official_name": "H4D",
+      "description": "CMS Down",
+      "group": "cms",
+      "dx_number": 17
+    },
+    {
+      "code": 705,
+      "evdev_name": "BTN_TRIGGER_HAPPY2",
+      "official_name": "H4L",
+      "description": "CMS Left",
+      "group": "cms",
+      "dx_number": 18
+    },
+    {
+      "code": 706,
+      "evdev_name": "BTN_TRIGGER_HAPPY3",
+      "official_name": "H4P",
+      "description": "CMS Press (push)",
+      "group": "cms",
+      "dx_number": 19
+    }
+  ],
+  "hats": [
+    {
+      "key": "H1",
+      "name": "H1 \u2014 Trim Hat",
+      "description": "Trim / Castle hat (top of stick)",
+      "code_x": 16,
+      "code_y": 17
+    }
+  ]
+}

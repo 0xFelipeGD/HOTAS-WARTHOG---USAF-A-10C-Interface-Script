@@ -1,0 +1,32 @@
+{
+  "_comment": "Default Warthog axis ranges (0-65535 for all full-range axes). Generated from known hardware specs. Run scan_joystick.py to replace with calibrated values from your specific unit.",
+  "stick": {
+    "device_type": "stick",
+    "device_path": null,
+    "device_name": "Thrustmaster HOTAS Warthog Joystick",
+    "vid": "044F",
+    "pid": "0402",
+    "axes": [
+      {"code": 0,  "evdev_name": "ABS_X",      "official_name": "Stick X",  "bipolar": true,  "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 1,  "evdev_name": "ABS_Y",      "official_name": "Stick Y",  "bipolar": true,  "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 16, "evdev_name": "ABS_HAT0X",  "official_name": "H1 Hat X", "bipolar": true,  "min": -1, "max": 1,   "fuzz": 0, "flat": 0, "is_hat": true},
+      {"code": 17, "evdev_name": "ABS_HAT0Y",  "official_name": "H1 Hat Y", "bipolar": true,  "min": -1, "max": 1,   "fuzz": 0, "flat": 0, "is_hat": true}
+    ]
+  },
+  "throttle": {
+    "device_type": "throttle",
+    "device_path": null,
+    "device_name": "Thrustmaster HOTAS Warthog Throttle",
+    "vid": "044F",
+    "pid": "0404",
+    "axes": [
+      {"code": 0,  "evdev_name": "ABS_X",        "official_name": "Slew X",         "bipolar": true,  "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 1,  "evdev_name": "ABS_Y",        "official_name": "Slew Y",         "bipolar": true,  "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 2,  "evdev_name": "ABS_Z",        "official_name": "Left Throttle",  "bipolar": false, "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 5,  "evdev_name": "ABS_RZ",       "official_name": "Right Throttle", "bipolar": false, "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 6,  "evdev_name": "ABS_THROTTLE", "official_name": "Friction",       "bipolar": false, "min": 0, "max": 65535, "fuzz": 0, "flat": 0},
+      {"code": 16, "evdev_name": "ABS_HAT0X",    "official_name": "CS Hat X",       "bipolar": true,  "min": -1, "max": 1,   "fuzz": 0, "flat": 0, "is_hat": true},
+      {"code": 17, "evdev_name": "ABS_HAT0Y",    "official_name": "CS Hat Y",       "bipolar": true,  "min": -1, "max": 1,   "fuzz": 0, "flat": 0, "is_hat": true}
+    ]
+  }
+}
